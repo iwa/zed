@@ -59,6 +59,7 @@ pub struct EditorSettings {
     pub inline_code_actions: bool,
     pub drag_and_drop_selection: DragAndDropSelection,
     pub lsp_document_colors: DocumentColorsRenderMode,
+    pub lsp_document_links: bool,
     pub minimum_contrast_for_highlights: f32,
     pub completion_menu_scrollbar: ShowScrollbar,
     pub completion_detail_alignment: CompletionDetailAlignment,
@@ -296,6 +297,7 @@ impl Settings for EditorSettings {
                 delay: drag_and_drop_selection.delay.unwrap(),
             },
             lsp_document_colors: editor.lsp_document_colors.unwrap(),
+            lsp_document_links: editor.lsp_document_links.unwrap(),
             minimum_contrast_for_highlights: editor.minimum_contrast_for_highlights.unwrap().0,
             completion_menu_scrollbar: editor
                 .completion_menu_scrollbar
