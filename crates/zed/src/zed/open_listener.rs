@@ -43,6 +43,7 @@ pub struct OpenRequest {
     pub open_channel_notes: Vec<(u64, Option<String>)>,
     pub join_channel: Option<u64>,
     pub remote_connection: Option<RemoteConnectionOptions>,
+    pub open_behavior: cli::OpenBehavior,
 }
 
 pub enum OpenRequestKind {
@@ -125,6 +126,7 @@ impl OpenRequest {
         this.diff_paths = request.diff_paths;
         this.diff_all = request.diff_all;
         this.dev_container = request.dev_container;
+        this.open_behavior = request.open_behavior;
         if let Some(wsl) = request.wsl {
             let (user, distro_name) = if let Some((user, distro)) = wsl.split_once('@') {
                 if user.is_empty() {
@@ -305,6 +307,7 @@ pub struct RawOpenRequest {
     pub diff_all: bool,
     pub dev_container: bool,
     pub wsl: Option<String>,
+    pub open_behavior: cli::OpenBehavior,
 }
 
 impl Global for OpenListener {}
@@ -476,6 +479,7 @@ pub async fn handle_cli_connection(
                                 diff_all,
                                 dev_container,
                                 wsl,
+                                open_behavior,
                             },
                             cx,
                         ) {
@@ -644,6 +648,47 @@ async fn resolve_open_behavior(
     None
 }
 
+/// Translates a [`cli::OpenBehavior`] into the matching [`workspace::OpenOptions`].
+///
+/// Fills `workspace_matching`, `add_dirs_to_sidebar` and `requesting_window`.
+/// Other fields are left at their defaults so callers can layer their own
+/// values (wait, env, dev_container, etc.) on top.
+pub fn open_options_for_behavior(
+    open_behavior: cli::OpenBehavior,
+    location: &SerializedWorkspaceLocation,
+    cx: &App,
+) -> workspace::OpenOptions {
+    // If reuse flag is passed, open a new workspace in an existing window.
+    let requesting_window = if open_behavior == cli::OpenBehavior::Reuse {
+        workspace::workspace_windows_for_location(location, cx)
+            .into_iter()
+            .next()
+    } else {
+        None
+    };
+    workspace::OpenOptions {
+        workspace_matching: match open_behavior {
+            cli::OpenBehavior::AlwaysNew | cli::OpenBehavior::Reuse => {
+                workspace::WorkspaceMatching::None
+            }
+            cli::OpenBehavior::Add => workspace::WorkspaceMatching::MatchSubdirectory,
+            _ => workspace::WorkspaceMatching::MatchExact,
+        },
+        add_dirs_to_sidebar: match open_behavior {
+            cli::OpenBehavior::ExistingWindow => true,
+            // For the default value, we consult the settings to decide
+            // whether to open in a new window or existing window.
+            cli::OpenBehavior::Default => {
+                workspace::WorkspaceSettings::get_global(cx).cli_default_open_behavior
+                    == settings::CliDefaultOpenBehavior::ExistingWindow
+            }
+            _ => false,
+        },
+        requesting_window,
+        ..Default::default()
+    }
+}
+
 async fn open_workspaces(
     paths: Vec<String>,
     diff_paths: Vec<[String; 2]>,
@@ -695,39 +740,13 @@ async fn open_workspaces(
     let mut errored = false;
 
     for (location, workspace_paths) in grouped_locations {
-        // If reuse flag is passed, open a new workspace in an existing window.
-        let replace_window = if open_behavior == cli::OpenBehavior::Reuse {
-            cx.update(|cx| {
-                workspace::workspace_windows_for_location(&location, cx)
-                    .into_iter()
-                    .next()
-            })
-        } else {
-            None
-        };
+        let base_open_options =
+            cx.update(|cx| open_options_for_behavior(open_behavior, &location, cx));
         let open_options = workspace::OpenOptions {
-            workspace_matching: match open_behavior {
-                cli::OpenBehavior::AlwaysNew | cli::OpenBehavior::Reuse => {
-                    workspace::WorkspaceMatching::None
-                }
-                cli::OpenBehavior::Add => workspace::WorkspaceMatching::MatchSubdirectory,
-                _ => workspace::WorkspaceMatching::MatchExact,
-            },
-            add_dirs_to_sidebar: match open_behavior {
-                cli::OpenBehavior::ExistingWindow => true,
-                // For the default value, we consult the settings to decide
-                // whether to open in a new window or existing window.
-                cli::OpenBehavior::Default => cx.update(|cx| {
-                    workspace::WorkspaceSettings::get_global(cx).cli_default_open_behavior
-                        == settings::CliDefaultOpenBehavior::ExistingWindow
-                }),
-                _ => false,
-            },
-            requesting_window: replace_window,
             wait,
             env: env.clone(),
             open_in_dev_container: dev_container,
-            ..Default::default()
+            ..base_open_options
         };
 
         match location {
@@ -978,6 +997,7 @@ mod tests {
             OpenRequest::parse(
                 RawOpenRequest {
                     urls: vec!["ssh://me@localhost:/".into()],
+                    open_behavior: cli::OpenBehavior::AlwaysNew,
                     ..Default::default()
                 },
                 cx,
@@ -999,6 +1019,27 @@ mod tests {
             })
         );
         assert_eq!(request.open_paths, vec!["/"]);
+        // Regression check for #52679: `--new` flag must survive URL parsing
+        // so it can be honored by the SSH open codepath.
+        assert_eq!(request.open_behavior, cli::OpenBehavior::AlwaysNew);
+    }
+
+    #[gpui::test]
+    fn test_open_options_for_behavior_always_new(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+        let options = cx.update(|cx| {
+            open_options_for_behavior(
+                cli::OpenBehavior::AlwaysNew,
+                &SerializedWorkspaceLocation::Local,
+                cx,
+            )
+        });
+        assert_eq!(
+            options.workspace_matching,
+            workspace::WorkspaceMatching::None
+        );
+        assert!(!options.add_dirs_to_sidebar);
+        assert!(options.requesting_window.is_none());
     }
 
     #[gpui::test]
